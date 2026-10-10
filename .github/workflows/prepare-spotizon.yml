@@ -1,34 +1,45 @@
-name: Prepare SPOTIZON source and build APK
+name: Build DATZON Music Android from original website ZIP
 
 on:
   push:
     paths:
-      - 'SPOTIZON-V1.0.0-ANDROID-SOURCE.zip'
+      - 'DATZON-MUSIC-V1.62.9-PLAYLIST-UI-POLISH.zip'
       - '.github/workflows/prepare-spotizon.yml'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: datzon-music-android-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  prepare-and-build:
+  build-android:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify uploaded source archive
+      - name: Verify and extract original DATZON Music website
+        shell: bash
         run: |
-          test -f "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip"
-          unzip -t "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip"
-          mkdir -p /tmp/spotizon-source
-          unzip -q "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip" -d /tmp/spotizon-source
-          test -f /tmp/spotizon-source/android-native/app/build.gradle.kts
-          test -f /tmp/spotizon-source/vercel.json
-          test -f /tmp/spotizon-source/index.html
-          echo "Source archive verified."
+          set -euo pipefail
+          ZIP="DATZON-MUSIC-V1.62.9-PLAYLIST-UI-POLISH.zip"
+          test -f "$ZIP"
+          unzip -t "$ZIP"
+          mkdir -p /tmp/datzon-source
+          unzip -q "$ZIP" -d /tmp/datzon-source
+          test -f /tmp/datzon-source/index.html
+          test -f /tmp/datzon-source/app.js
+          test -f /tmp/datzon-source/styles.css
+          test -f /tmp/datzon-source/firebase-service.js
+          test -f /tmp/datzon-source/assets/icon-512.png
+          echo "Verified original website files:"
+          find /tmp/datzon-source -maxdepth 2 -type f | wc -l
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -44,14 +55,376 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build SPOTIZON debug APK
-        working-directory: /tmp/spotizon-source/android-native
+      - name: Prepare Android project using the original website files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p android-native/app/src/main/assets/www
+          mkdir -p android-native/app/src/main/res/drawable-nodpi
+          mkdir -p android-native/app/src/main/java/id/datzon/music
+          cp -a /tmp/datzon-source/. android-native/app/src/main/assets/www/
+          cp /tmp/datzon-source/assets/icon-512.png android-native/app/src/main/res/drawable-nodpi/datzon_icon.png
+
+          # Keep all original UI, CSS, JavaScript, icons and features. Only adjust
+          # resource base paths for bundled assets and first-party API audio URLs.
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("android-native/app/src/main/assets/www")
+          index = root / "index.html"
+          html = index.read_text(encoding="utf-8")
+          old_base = '<base href="/" />'
+          new_base = '<base href="https://appassets.androidplatform.net/assets/www/" />'
+          if old_base not in html:
+              raise SystemExit("Expected base tag was not found in original index.html")
+          html = html.replace(old_base, new_base, 1)
+          bridge = """<script>
+          (() => {
+            const apiOrigin = 'https://www.spotizon.my.id';
+            const nativeFetch = window.fetch.bind(window);
+            window.fetch = (input, init) => {
+              try {
+                const raw = input instanceof Request ? input.url : String(input);
+                const u = new URL(raw, document.baseURI);
+                if (u.origin === 'https://appassets.androidplatform.net' && u.pathname.startsWith('/api/')) {
+                  u.protocol = 'https:';
+                  u.host = 'www.spotizon.my.id';
+                  if (input instanceof Request) input = new Request(u.href, input);
+                  else input = u.href;
+                }
+              } catch (_) {}
+              return nativeFetch(input, init);
+            };
+          })();
+          </script>"""
+          html = html.replace(new_base, new_base + "\n" + bridge, 1)
+          index.write_text(html, encoding="utf-8")
+
+          app = root / "app.js"
+          js = app.read_text(encoding="utf-8")
+          js = js.replace(
+              "return spotifyUrl ? `/api/theresav/audio?url=",
+              "return spotifyUrl ? `${location.origin}/api/theresav/audio?url="
+          )
+          js = js.replace(
+              "? `${CONFIG.sylvaticaSpotyloaderAudioProxyPath}?url=",
+              "? `${location.origin}${CONFIG.sylvaticaSpotyloaderAudioProxyPath}?url="
+          )
+          # Disable the website PWA service worker inside the packaged app.
+          js = js.replace(
+              "if('serviceWorker'in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}",
+              "/* Service worker disabled in the bundled Android app. */"
+          )
+          app.write_text(js, encoding="utf-8")
+          PY
+
+          cat > android-native/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DATZONMusic"
+          include(":app")
+          EOF
+
+          cat > android-native/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+          }
+          EOF
+
+          cat > android-native/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          org.gradle.parallel=true
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > android-native/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+          }
+
+          android {
+              namespace = "id.datzon.music"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "id.datzon.music"
+                  minSdk = 23
+                  targetSdk = 34
+                  versionCode = 1629
+                  versionName = "1.62.9"
+              }
+
+              buildTypes {
+                  debug {
+                      isMinifyEnabled = false
+                  }
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation("androidx.webkit:webkit:1.12.1")
+          }
+          EOF
+
+          cat > android-native/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <application
+                  android:allowBackup="true"
+                  android:usesCleartextTraffic="false"
+                  android:label="DATZON Music"
+                  android:icon="@drawable-nodpi/datzon_icon"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:hardwareAccelerated="true"
+                  android:supportsRtl="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > android-native/app/src/main/java/id/datzon/music/MainActivity.java <<'EOF'
+          package id.datzon.music;
+
+          import android.app.Activity;
+          import android.app.DownloadManager;
+          import android.content.ActivityNotFoundException;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.view.View;
+          import android.view.Window;
+          import android.view.WindowManager;
+          import android.webkit.CookieManager;
+          import android.webkit.DownloadListener;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.webkit.URLUtil;
+          import android.widget.Toast;
+          import androidx.webkit.WebViewAssetLoader;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.nio.charset.StandardCharsets;
+
+          public final class MainActivity extends Activity {
+              private static final int FILE_PICKER_REQUEST = 4201;
+              private static final String BACKEND_ORIGIN = "https://www.spotizon.my.id/";
+              private WebView webView;
+              private ValueCallback<Uri[]> fileChooserCallback;
+              private WebViewAssetLoader assetLoader;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  Window window = getWindow();
+                  window.setStatusBarColor(Color.rgb(8, 8, 8));
+                  window.setNavigationBarColor(Color.BLACK);
+                  window.getDecorView().setSystemUiVisibility(0);
+                  window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+
+                  assetLoader = new WebViewAssetLoader.Builder()
+                          .setDomain("appassets.androidplatform.net")
+                          .addPathHandler("/assets/", new WebViewAssetLoader.AssetsPathHandler(this))
+                          .build();
+
+                  webView = new WebView(this);
+                  webView.setBackgroundColor(Color.rgb(8, 8, 8));
+                  webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+                  setContentView(webView);
+
+                  WebSettings settings = webView.getSettings();
+                  settings.setJavaScriptEnabled(true);
+                  settings.setDomStorageEnabled(true);
+                  settings.setDatabaseEnabled(true);
+                  settings.setMediaPlaybackRequiresUserGesture(false);
+                  settings.setSupportZoom(false);
+                  settings.setBuiltInZoomControls(false);
+                  settings.setDisplayZoomControls(false);
+                  settings.setAllowFileAccess(false);
+                  settings.setAllowContentAccess(true);
+                  settings.setJavaScriptCanOpenWindowsAutomatically(true);
+                  settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+                  settings.setLoadsImagesAutomatically(true);
+                  settings.setDefaultTextEncodingName("UTF-8");
+
+                  CookieManager cookies = CookieManager.getInstance();
+                  cookies.setAcceptCookie(true);
+                  cookies.setAcceptThirdPartyCookies(webView, true);
+
+                  webView.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          return assetLoader.shouldInterceptRequest(request.getUrl());
+                      }
+
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                          Uri uri = request.getUrl();
+                          String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+                          if ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)) {
+                              return false;
+                          }
+                          try {
+                              startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                          } catch (ActivityNotFoundException ignored) {
+                              Toast.makeText(MainActivity.this, "Tidak ada aplikasi untuk membuka tautan ini", Toast.LENGTH_SHORT).show();
+                          }
+                          return true;
+                      }
+                  });
+
+                  webView.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                          if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+                          fileChooserCallback = callback;
+                          Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                          intent.addCategory(Intent.CATEGORY_OPENABLE);
+                          intent.setType("*/*");
+                          try {
+                              startActivityForResult(Intent.createChooser(intent, "Pilih file"), FILE_PICKER_REQUEST);
+                              return true;
+                          } catch (ActivityNotFoundException error) {
+                              fileChooserCallback = null;
+                              callback.onReceiveValue(null);
+                              return false;
+                          }
+                      }
+                  });
+
+                  webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+                      try {
+                          DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+                          request.setMimeType(mimeType);
+                          request.addRequestHeader("User-Agent", userAgent);
+                          String cookie = CookieManager.getInstance().getCookie(url);
+                          if (cookie != null) request.addRequestHeader("Cookie", cookie);
+                          request.setTitle(URLUtil.guessFileName(url, contentDisposition, mimeType));
+                          request.setDescription("Mengunduh dari DATZON Music");
+                          request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                          request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,
+                                  URLUtil.guessFileName(url, contentDisposition, mimeType));
+                          ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(request);
+                          Toast.makeText(this, "Unduhan dimulai", Toast.LENGTH_SHORT).show();
+                      } catch (Exception error) {
+                          Toast.makeText(this, "Unduhan gagal dimulai", Toast.LENGTH_LONG).show();
+                      }
+                  });
+
+                  try (InputStream stream = getAssets().open("www/index.html")) {
+                      byte[] bytes = new byte[stream.available()];
+                      int count = stream.read(bytes);
+                      String html = new String(bytes, 0, Math.max(0, count), StandardCharsets.UTF_8);
+                      // A real HTTPS origin keeps the original site's same-origin API routes and Firebase behavior.
+                      webView.loadDataWithBaseURL(BACKEND_ORIGIN, html, "text/html", "UTF-8", null);
+                  } catch (IOException error) {
+                      Toast.makeText(this, "File DATZON Music tidak ditemukan", Toast.LENGTH_LONG).show();
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  super.onActivityResult(requestCode, resultCode, data);
+                  if (requestCode == FILE_PICKER_REQUEST && fileChooserCallback != null) {
+                      Uri[] result = resultCode == RESULT_OK && data != null && data.getData() != null
+                              ? new Uri[]{data.getData()} : null;
+                      fileChooserCallback.onReceiveValue(result);
+                      fileChooserCallback = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (webView != null && webView.canGoBack()) webView.goBack();
+                  else super.onBackPressed();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
+                  if (webView != null) {
+                      webView.stopLoading();
+                      webView.setWebChromeClient(null);
+                      webView.setWebViewClient(null);
+                      webView.destroy();
+                      webView = null;
+                  }
+                  super.onDestroy();
+              }
+          }
+          EOF
+
+          echo "Android wrapper generated from DATZON Music V1.62.9 website source."
+          test -s android-native/app/src/main/assets/www/index.html
+          test -s android-native/app/src/main/assets/www/app.js
+          test -s android-native/app/src/main/java/id/datzon/music/MainActivity.java
+
+      - name: Build APK from original DATZON Music source
+        working-directory: android-native
         run: gradle --no-daemon assembleDebug
 
-      - name: Upload APK artifact
+      - name: Verify APK output
+        run: |
+          set -euo pipefail
+          APK="android-native/app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          file "$APK"
+          ls -lh "$APK"
+
+      - name: Upload installable APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SPOTIZON-debug-apk
-          path: /tmp/spotizon-source/android-native/app/build/outputs/apk/debug/app-debug.apk
+          name: DATZON-Music-Android-V1.62.9-APK
+          path: android-native/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+
+      - name: Publish direct APK download
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: datzon-music-android-v1.62.9-build-${{ github.run_number }}
+          name: DATZON Music Android V1.62.9 - Build ${{ github.run_number }}
+          body: |
+            Android debug APK built from the original DATZON Music V1.62.9 website ZIP.
+            The original HTML, CSS, JavaScript, icons, player and playlist interface are bundled in the APK.
+            Install the APK on Android. This is a debug-signed installable build.
+          prerelease: true
+          files: android-native/app/build/outputs/apk/debug/app-debug.apk
