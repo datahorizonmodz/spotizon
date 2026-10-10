@@ -196,8 +196,8 @@ jobs:
                   android:allowBackup="true"
                   android:usesCleartextTraffic="false"
                   android:label="DATZON Music"
-                  android:icon="@drawable-nodpi/datzon_icon"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
+                  android:icon="@drawable/datzon_icon"
+                  android:theme="@android:style/Theme.Material.NoActionBar"
                   android:hardwareAccelerated="true"
                   android:supportsRtl="true">
                   <activity
