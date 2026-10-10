@@ -1,2 +1,4 @@
 Trigger initial Android build from DATZON-MUSIC-V1.62.9-PLAYLIST-UI-POLISH.zip.
 The website ZIP remains unchanged.
+
+Fix: launch Home with a 4.5-second metadata startup deadline so offline/slow API calls cannot keep skeletons forever.
