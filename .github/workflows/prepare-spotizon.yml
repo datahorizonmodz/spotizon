@@ -99,6 +99,8 @@ jobs:
           html = html.replace(new_base, new_base + "\n" + bridge, 1)
           index.write_text(html, encoding="utf-8")
 
+          app = root / "app.js"
+          js = app.read_text(encoding="utf-8")
           js = js.replace(
               "const [discovery] = await Promise.all([loadHomeDiscovery(force), loadHomeSpotlight(force)]);",
               """const withStartupDeadline = (task, fallbackValue) => new Promise(resolve => {
