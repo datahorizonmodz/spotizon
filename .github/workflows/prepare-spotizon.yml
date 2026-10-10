@@ -4,7 +4,7 @@ on:
   push:
     paths:
       - 'DATZON-MUSIC-V1.62.9-PLAYLIST-UI-POLISH.zip'
-      - '.github/workflows/prepare-spotizon.yml'
+      - 'BUILD-ANDROID-NOW.txt'
   workflow_dispatch:
 
 permissions:
