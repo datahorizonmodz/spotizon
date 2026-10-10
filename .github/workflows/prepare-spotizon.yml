@@ -99,8 +99,21 @@ jobs:
           html = html.replace(new_base, new_base + "\n" + bridge, 1)
           index.write_text(html, encoding="utf-8")
 
-          app = root / "app.js"
-          js = app.read_text(encoding="utf-8")
+          js = js.replace(
+              "const [discovery] = await Promise.all([loadHomeDiscovery(force), loadHomeSpotlight(force)]);",
+              """const withStartupDeadline = (task, fallbackValue) => new Promise(resolve => {
+                const timer = window.setTimeout(() => resolve(fallbackValue), 4500);
+                Promise.resolve(task).then(
+                  value => { window.clearTimeout(timer); resolve(value); },
+                  () => { window.clearTimeout(timer); resolve(fallbackValue); }
+                );
+              });
+              // Public discovery APIs can stall inside Android WebView. Never hold Home on skeletons.
+              const [discovery] = await Promise.all([
+                withStartupDeadline(loadHomeDiscovery(force), state.homeDiscovery || {}),
+                withStartupDeadline(loadHomeSpotlight(force), spotlightTracksForHome())
+              ]);"""
+          )
           js = js.replace(
               "return spotifyUrl ? `/api/theresav/audio?url=",
               "return spotifyUrl ? `${location.origin}/api/theresav/audio?url="
