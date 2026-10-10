@@ -4,10 +4,11 @@ on:
   push:
     paths:
       - 'SPOTIZON-V1.0.0-ANDROID-SOURCE.zip'
+      - '.github/workflows/prepare-spotizon.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   prepare-and-build:
@@ -15,34 +16,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract SPOTIZON project into repository root
+      - name: Verify uploaded source archive
         run: |
-          if [ ! -f "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip" ]; then
-            echo "Upload SPOTIZON-V1.0.0-ANDROID-SOURCE.zip to the repository root first."
-            exit 1
-          fi
+          test -f "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip"
+          unzip -t "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip"
           mkdir -p /tmp/spotizon-source
-          unzip -q SPOTIZON-V1.0.0-ANDROID-SOURCE.zip -d /tmp/spotizon-source
-          cp -a /tmp/spotizon-source/. .
-          rm -f SPOTIZON-V1.0.0-ANDROID-SOURCE.zip
-          test -f android-native/app/build.gradle.kts
-          test -f vercel.json
-          test -f index.html
-
-      - name: Commit extracted source files
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if ! git diff --cached --quiet; then
-            git commit -m "Add SPOTIZON music app and Vercel backend source"
-            git push
-          else
-            echo "No source changes to commit."
-          fi
+          unzip -q "SPOTIZON-V1.0.0-ANDROID-SOURCE.zip" -d /tmp/spotizon-source
+          test -f /tmp/spotizon-source/android-native/app/build.gradle.kts
+          test -f /tmp/spotizon-source/vercel.json
+          test -f /tmp/spotizon-source/index.html
+          echo "Source archive verified."
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -61,13 +45,13 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build SPOTIZON debug APK
-        working-directory: android-native
+        working-directory: /tmp/spotizon-source/android-native
         run: gradle --no-daemon assembleDebug
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: SPOTIZON-debug-apk
-          path: android-native/app/build/outputs/apk/debug/app-debug.apk
+          path: /tmp/spotizon-source/android-native/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 14
